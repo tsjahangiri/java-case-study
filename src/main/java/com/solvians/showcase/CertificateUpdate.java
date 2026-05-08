@@ -49,6 +49,7 @@ public class CertificateUpdate implements Callable<String> {
         this.bidSize   = random.nextInt(4001) + 1000;   // [1000, 5000]
         this.askPrice  = random.nextInt(10001) / 100.0 + 100.0;
         this.askSize   = random.nextInt(9001) + 1000;   // [1000, 10000]
+        validate();
     }
 
     /**
@@ -68,4 +69,36 @@ public class CertificateUpdate implements Callable<String> {
     public int getBidSize()    { return bidSize; }
     public double getAskPrice(){ return askPrice; }
     public int getAskSize()    { return askSize; }
+
+    /**
+     * Returns the CSV line for this update without throwing a checked exception.
+     * Prefer this over calling {@link #call()} directly from application code.
+     *
+     * @return comma-separated line e.g. {@code "1352122280502,DE123456789X,101.23,1000,103.45,2000"}
+     */
+    public String toLine() {
+        try {
+            return call();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to format certificate update", e);
+        }
+    }
+
+    private void validate() {
+        if (isin == null || isin.length() != 12) {
+            throw new IllegalStateException("Generated invalid ISIN: " + isin);
+        }
+        if (bidPrice < 100.0 || bidPrice > 200.0) {
+            throw new IllegalStateException("Bid price out of range: " + bidPrice);
+        }
+        if (bidSize < 1000 || bidSize > 5000) {
+            throw new IllegalStateException("Bid size out of range: " + bidSize);
+        }
+        if (askPrice < 100.0 || askPrice > 200.0) {
+            throw new IllegalStateException("Ask price out of range: " + askPrice);
+        }
+        if (askSize < 1000 || askSize > 10000) {
+            throw new IllegalStateException("Ask size out of range: " + askSize);
+        }
+    }
 }

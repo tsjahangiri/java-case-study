@@ -64,6 +64,19 @@ public class CertificateUpdateGenerator {
      * @param executor the executor to run generation tasks on — caller is responsible for shutdown
      */
     public CertificateUpdateGenerator(int threads, int quotes, ExecutorService executor) {
+        if (threads <= 0) {
+            throw new IllegalArgumentException(
+                    "threads must be positive, got: " + threads
+            );
+        }
+        if (quotes <= 0) {
+            throw new IllegalArgumentException(
+                    "quotes must be positive, got: " + quotes
+            );
+        }
+        if (executor == null) {
+            throw new IllegalArgumentException("executor must not be null");
+        }
         this.threads  = threads;
         this.quotes   = quotes;
         this.executor = executor;
@@ -79,7 +92,19 @@ public class CertificateUpdateGenerator {
      * @param quotes  number of quotes per thread
      */
     public CertificateUpdateGenerator(int threads, int quotes) {
-        this(threads, quotes, Executors.newFixedThreadPool(threads));
+        this(
+                threads,
+                quotes,
+                Executors.newFixedThreadPool(
+                        Math.min(threads, Runtime.getRuntime().availableProcessors()),
+                        r -> {
+                            Thread t = new Thread(r);
+                            t.setName("cert-generator-" + t.getId());
+                            t.setDaemon(true);
+                            return t;
+                        }
+                )
+        );
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -193,6 +218,8 @@ public class CertificateUpdateGenerator {
             // swallowing it here would hide the signal from code further up the call stack.
             Thread.currentThread().interrupt();
 
+            System.err.println("[CertificateUpdateGenerator] Interrupted while waiting " +
+                    "for tasks — returning empty result");
             // Return empty list rather than null or a partial result.
             // The caller can check if the stream is empty and decide what to do.
             return Collections.emptyList();

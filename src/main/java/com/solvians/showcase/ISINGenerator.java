@@ -1,5 +1,6 @@
 package com.solvians.showcase;
 
+import java.util.Random;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -23,7 +24,7 @@ public class ISINGenerator {
     /**
      * Generates a random valid ISIN using the provided random instance.
      */
-    public static String generate(ThreadLocalRandom random) {
+    public static String generate(Random random) {
         StringBuilder body = new StringBuilder(11);
 
         // 2 random uppercase letters
@@ -54,6 +55,18 @@ public class ISINGenerator {
      * Example: "DE123456789" → check digit 6
      */
     public static int computeCheckDigit(String isin11) {
+
+        if (isin11 == null) {
+            throw new IllegalArgumentException("ISIN body must not be null");
+        }
+        if (isin11.length() != 11) {
+            throw new IllegalArgumentException(
+                    "ISIN body must be exactly 11 characters, got: " + isin11.length()
+            );
+        }
+
+        isin11 = isin11.toUpperCase();
+
         // Step 1: expand letters to numeric strings
         StringBuilder expanded = new StringBuilder();
         for (char c : isin11.toCharArray()) {
