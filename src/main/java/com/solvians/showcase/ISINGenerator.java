@@ -8,7 +8,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * Format: 2 uppercase letters + 9 alphanumeric characters + 1 check digit
  * The check digit is computed using a Luhn-style algorithm as specified.
  */
-public class IsinGenerator {
+public class ISINGenerator {
 
     private static final String LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -23,7 +23,7 @@ public class IsinGenerator {
     /**
      * Generates a random valid ISIN using the provided random instance.
      */
-    public static String generate(ThreadLocalRandom random){
+    public static String generate(ThreadLocalRandom random) {
         StringBuilder body = new StringBuilder(11);
 
         // 2 random uppercase letters
@@ -54,7 +54,6 @@ public class IsinGenerator {
      * Example: "DE123456789" → check digit 6
      */
     public static int computeCheckDigit(String isin11) {
-
         // Step 1: expand letters to numeric strings
         StringBuilder expanded = new StringBuilder();
         for (char c : isin11.toCharArray()) {
