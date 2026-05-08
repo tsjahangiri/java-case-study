@@ -1,8 +1,9 @@
 package com.solvians.showcase;
 
+import java.util.concurrent.Callable;
 import java.util.concurrent.ThreadLocalRandom;
 
-public class CertificateUpdate {
+public class CertificateUpdate implements Callable<String> {
 
     private final long timestamp;
     private final String isin;
@@ -22,6 +23,12 @@ public class CertificateUpdate {
         this.bidSize   = random.nextInt(4001) + 1000;   // [1000, 5000]
         this.askPrice  = random.nextInt(10001) / 100.0 + 100.0;
         this.askSize   = random.nextInt(9001) + 1000;   // [1000, 10000]
+    }
+
+    @Override
+    public String call() {
+        return String.format("%d,%s,%.2f,%d,%.2f,%d",
+                timestamp, isin, bidPrice, bidSize, askPrice, askSize);
     }
 
     public long getTimestamp() { return timestamp; }
