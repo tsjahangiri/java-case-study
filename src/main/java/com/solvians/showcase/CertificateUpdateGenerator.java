@@ -14,37 +14,28 @@ import java.util.stream.Stream;
  *
  * <p>Responsibilities are deliberately separated into three layers:
  * <ul>
- *   <li><b>Configuration</b> – how many items to produce and how many threads to use</li>
- *   <li><b>Execution</b>     – running tasks in parallel via an {@link ExecutorService}</li>
- *   <li><b>Delivery</b>      – returning results as a {@link Stream} for the caller to process</li>
+ *   <li><b>Configuration</b> — how many items to produce and how many threads to use</li>
+ *   <li><b>Execution</b>     — running tasks in parallel via an {@link ExecutorService}</li>
+ *   <li><b>Delivery</b>      — returning results as a {@link Stream} to the caller</li>
  * </ul>
  *
- * <p>The {@link ExecutorService} is injected rather than created internally.
- * This means the caller controls the threading strategy and lifecycle,
- * tests can pass a controlled single-threaded executor,
- * and the threading strategy can be swapped (e.g. virtual threads in Java 21)
- * without changing this class at all.
- *
- * <p><b>Typical usage:</b>
- * <pre>{@code
- *   ExecutorService pool = Executors.newFixedThreadPool(10);
- *   CertificateUpdateGenerator generator = new CertificateUpdateGenerator(10, 100, pool);
- *   Stream<CertificateUpdate> updates = generator.generateQuotes();
- *   pool.shutdown();
- * }</pre>
+ * <p>The {@link ExecutorService} is injected rather than created internally so:
+ * <ul>
+ *   <li>The caller controls the threading strategy and lifecycle</li>
+ *   <li>Tests can pass a single-threaded executor for predictable behaviour</li>
+ *   <li>Threading strategy can be swapped (e.g. virtual threads) without changing this class</li>
+ * </ul>
  */
 public class CertificateUpdateGenerator {
 
-    private final int threads;
-    private final int quotes;
+    /** Maximum number of threads allowed to prevent resource exhaustion. */
+    static final int MAX_THREADS = 100;
 
-    /**
-     * The executor that runs certificate generation tasks in parallel.
-     *
-     * <p>Injected from outside so the caller owns the lifecycle (shutdown, reuse, swap).
-     * This also makes the class easy to test — pass a single-threaded executor
-     * for predictable, deterministic test behaviour.
-     */
+    /** Maximum number of quotes per thread allowed to prevent memory exhaustion. */
+    static final int MAX_QUOTES  = 1_000_000;
+
+    private final int             threads;
+    private final int             quotes;
     private final ExecutorService executor;
 
     // ── Constructors ──────────────────────────────────────────────────────────
@@ -52,18 +43,20 @@ public class CertificateUpdateGenerator {
     /**
      * Full constructor. Accepts an externally created executor.
      *
-     * <p>Use this when you want full control over the threading strategy, for example:
+     * <p>Use this when you need full control over the threading strategy:
      * <ul>
-     *   <li>Sharing one pool across multiple generators</li>
-     *   <li>Using virtual threads: {@code Executors.newVirtualThreadPerTaskExecutor()}</li>
-     *   <li>Using a single-threaded executor in tests</li>
+     *   <li>Share one pool across multiple generators</li>
+     *   <li>Use virtual threads: {@code Executors.newVirtualThreadPerTaskExecutor()}</li>
+     *   <li>Use a single-threaded executor in tests for deterministic behaviour</li>
      * </ul>
      *
-     * @param threads  number of worker threads (also used to calculate total output)
-     * @param quotes   number of quotes per thread
-     * @param executor the executor to run generation tasks on — caller is responsible for shutdown
+     * @param threads  number of worker threads — must be between 1 and {@value #MAX_THREADS}
+     * @param quotes   number of quotes per thread — must be between 1 and {@value #MAX_QUOTES}
+     * @param executor the executor to run tasks on — must not be null
+     * @throws IllegalArgumentException if any argument is out of range or null
      */
     public CertificateUpdateGenerator(int threads, int quotes, ExecutorService executor) {
+        validateConstructorArgs(threads, quotes, executor);
         this.threads  = threads;
         this.quotes   = quotes;
         this.executor = executor;
@@ -72,14 +65,34 @@ public class CertificateUpdateGenerator {
     /**
      * Convenience constructor. Creates a fixed thread pool internally.
      *
-     * <p>Use this for straightforward cases where you don't need to share
-     * or customise the executor. The pool size matches the {@code threads} parameter.
+     * <p>Thread count is capped at {@code availableProcessors()} to avoid
+     * over-subscription — spinning up more threads than cores just causes
+     * context switching overhead without parallelism benefit.
      *
-     * @param threads number of worker threads
-     * @param quotes  number of quotes per thread
+     * <p>Threads are named ({@code cert-generator-N}) and set as daemon threads
+     * so the JVM can exit cleanly even if shutdown is not called explicitly.
+     *
+     * @param threads number of worker threads — must be between 1 and {@value #MAX_THREADS}
+     * @param quotes  number of quotes per thread — must be between 1 and {@value #MAX_QUOTES}
+     * @throws IllegalArgumentException if either argument is out of range
      */
     public CertificateUpdateGenerator(int threads, int quotes) {
-        this(threads, quotes, Executors.newFixedThreadPool(threads));
+        this(
+                threads,
+                quotes,
+                Executors.newFixedThreadPool(
+                        // Cap at available processors — more threads than cores = overhead, not speed
+                        Math.min(threads, Runtime.getRuntime().availableProcessors()),
+                        r -> {
+                            Thread t = new Thread(r);
+                            // Named threads appear in thread dumps and monitoring tools
+                            t.setName("cert-generator-" + t.getId());
+                            // Daemon so the JVM does not hang if shutdown() is not called
+                            t.setDaemon(true);
+                            return t;
+                        }
+                )
+        );
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -87,15 +100,14 @@ public class CertificateUpdateGenerator {
     /**
      * Generates {@code threads × quotes} certificate updates in parallel.
      *
-     * <p>The method orchestrates three steps:
+     * <p>Orchestrates three steps:
      * <ol>
-     *   <li>Build a list of tasks — one per certificate update</li>
+     *   <li>Build a task list — one {@link Callable} per certificate update</li>
      *   <li>Execute all tasks in parallel and wait for completion</li>
-     *   <li>Return the results as a {@link Stream}</li>
+     *   <li>Return results as a {@link Stream}</li>
      * </ol>
      *
-     * <p>Each step is handled by a dedicated private method so future changes
-     * have a single, obvious place to land:
+     * <p>Future changes have a single obvious place to land:
      * <ul>
      *   <li>Different task type?        → change {@link #buildTasks(int)}</li>
      *   <li>Add timeout or retry logic? → change {@link #executeTasks(List)}</li>
@@ -103,12 +115,13 @@ public class CertificateUpdateGenerator {
      * </ul>
      *
      * @return a {@code Stream} of fully constructed {@link CertificateUpdate} objects
+     *         — empty if execution was interrupted
      */
     public Stream<CertificateUpdate> generateQuotes() {
         int total = threads * quotes;
 
         List<Callable<CertificateUpdate>> tasks = buildTasks(total);
-        List<CertificateUpdate> results         = executeTasks(tasks);
+        List<CertificateUpdate>           results = executeTasks(tasks);
 
         return results.stream();
     }
@@ -116,85 +129,92 @@ public class CertificateUpdateGenerator {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /**
+     * Validates constructor arguments before any state is set.
+     *
+     * <p>Extracted as a separate method so validation logic is testable
+     * independently and {@code main} constructors stay readable.
+     *
+     * @throws IllegalArgumentException if any argument is invalid
+     */
+    private static void validateConstructorArgs(int threads, int quotes, ExecutorService executor) {
+        if (threads <= 0 || threads > MAX_THREADS) {
+            throw new IllegalArgumentException(
+                    "threads must be between 1 and " + MAX_THREADS + ", got: " + threads
+            );
+        }
+        if (quotes <= 0 || quotes > MAX_QUOTES) {
+            throw new IllegalArgumentException(
+                    "quotes must be between 1 and " + MAX_QUOTES + ", got: " + quotes
+            );
+        }
+        if (executor == null) {
+            throw new IllegalArgumentException("executor must not be null");
+        }
+    }
+
+    /**
      * Builds the list of tasks to be executed in parallel.
      *
-     * <p>Each task is {@code CertificateUpdate::new} — a constructor reference
-     * that acts as a {@code Callable<CertificateUpdate>}.
-     * When the executor calls {@code task.call()}, it simply constructs
-     * a new {@link CertificateUpdate}, which generates all random field values
-     * internally in its constructor.
+     * <p>{@code CertificateUpdate::new} is a constructor reference —
+     * equivalent to {@code () -> new CertificateUpdate()}.
+     * When called by the executor, it constructs one {@link CertificateUpdate}
+     * which generates all random field values internally.
      *
-     * <p>Creating the task list upfront (rather than submitting tasks one by one
-     * inside the executor) keeps the execution step clean and makes
-     * the task list easy to inspect, modify, or replace in isolation.
-     *
-     * @param total the number of tasks to create
-     * @return a list of {@code Callable<CertificateUpdate>} ready for submission
+     * @param total number of tasks to create
+     * @return list of {@code Callable<CertificateUpdate>} ready for submission
      */
     private List<Callable<CertificateUpdate>> buildTasks(int total) {
         List<Callable<CertificateUpdate>> tasks = new ArrayList<>(total);
-
         for (int i = 0; i < total; i++) {
-            // CertificateUpdate::new is a constructor reference —
-            // equivalent to () -> new CertificateUpdate()
-            // but more concise. Each call to task.call() produces one new instance.
             tasks.add(CertificateUpdate::new);
         }
-
         return tasks;
     }
 
     /**
      * Submits all tasks to the executor, waits for completion, and collects results.
      *
-     * <p>{@code invokeAll} handles three things in one call:
-     * <ol>
-     *   <li>Submits every task to the thread pool</li>
-     *   <li>Blocks until every task has finished (or the thread is interrupted)</li>
-     *   <li>Returns a {@code List<Future>} where every future is already completed</li>
-     * </ol>
-     *
-     * <p>Because {@code invokeAll} guarantees all futures are done before returning,
-     * the subsequent {@code future.get()} calls return instantly — there is no
-     * additional waiting at collection time.
+     * <p>{@code invokeAll} submits every task, blocks until all complete,
+     * and returns futures that are already resolved — so {@code future.get()}
+     * returns instantly with no additional waiting.
      *
      * <p><b>Error handling:</b>
      * <ul>
-     *   <li>{@code InterruptedException} — the waiting thread was interrupted externally.
-     *       We restore the interrupt flag with {@code Thread.currentThread().interrupt()}
-     *       so the caller can detect and handle it. We return an empty list rather
-     *       than crashing, so partial results are not silently corrupted.</li>
-     *   <li>{@code ExecutionException} (wrapped in RuntimeException) — a task itself
-     *       threw an exception. Wrapping preserves the original cause for debugging.</li>
+     *   <li>{@code InterruptedException} — thread was interrupted while waiting.
+     *       Interrupt flag is restored so callers can detect it.
+     *       An empty list is returned and a warning is written to stderr.</li>
+     *   <li>{@code ExecutionException} — a task itself threw an exception.
+     *       Wrapped in {@code RuntimeException} to preserve the original cause.</li>
      * </ul>
      *
-     * @param tasks the list of tasks to execute
-     * @return a list of completed {@link CertificateUpdate} objects
+     * @param tasks list of tasks to execute
+     * @return list of completed {@link CertificateUpdate} objects,
+     *         empty if interrupted
      */
     private List<CertificateUpdate> executeTasks(List<Callable<CertificateUpdate>> tasks) {
         try {
-            return executor.invokeAll(tasks)   // submit all, block until all done
+            return executor.invokeAll(tasks)
                     .stream()
                     .map(future -> {
                         try {
-                            // future.get() is safe here — invokeAll guarantees
-                            // every future is already complete before we reach this point
+                            // invokeAll guarantees all futures are done before
+                            // we reach this point — get() returns instantly
                             return future.get();
                         } catch (Exception e) {
-                            // Wrap checked exception so it can propagate through the stream
                             throw new RuntimeException("Failed to retrieve task result", e);
                         }
                     })
                     .collect(Collectors.toList());
 
         } catch (InterruptedException e) {
-            // The thread waiting in invokeAll was interrupted from outside.
-            // Restore the interrupt flag so the caller's thread can detect it —
-            // swallowing it here would hide the signal from code further up the call stack.
+            // Restore the interrupt flag — swallowing it would hide the signal
+            // from code higher up the call stack
             Thread.currentThread().interrupt();
 
-            // Return empty list rather than null or a partial result.
-            // The caller can check if the stream is empty and decide what to do.
+            // Warn visibly — an empty stream in production is a serious issue
+            System.err.println("[CertificateUpdateGenerator] WARNING: interrupted while " +
+                    "waiting for tasks to complete — returning empty result");
+
             return Collections.emptyList();
         }
     }
