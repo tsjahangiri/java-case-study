@@ -3,75 +3,67 @@ package com.solvians.showcase;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
+import java.util.Random;
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests for {@link ISINGenerator}.
  *
- * Organised into four groups:
- *  1. Check digit algorithm — known inputs with known expected outputs
- *  2. Generated ISIN format — structural rules (length, character types)
- *  3. Check digit validity  — generated ISINs pass their own check digit
- *  4. Edge cases            — boundary and corner case inputs
+ * Groups:
+ *   1. Check digit algorithm  — known inputs, hand-calculated expected outputs
+ *   2. Generated ISIN format  — structural rules (length, character types)
+ *   3. Check digit validity   — generated ISINs pass their own check digit
+ *   4. Input validation       — null, wrong length, invalid characters
+ *   5. Edge cases             — boundary values and corner cases
+ *   6. Regression load tests  — high-volume runs to catch non-deterministic bugs
  */
 class ISINGeneratorTest {
 
     // ── Group 1: Check digit algorithm ───────────────────────────────────────
-    //
-    // These tests use known inputs from the README so we can verify
-    // the algorithm against a hand-calculated expected value.
-    // If any of these fail, the algorithm itself is broken.
 
     @Test
     void computeCheckDigit_readmeExample_returnsCorrectDigit() {
-        // README states: "DE123456789" → check digit 6
-        // D=13, E=14 → "1314123456789" → sum=54 → (10-4)%10=6
+        // README states: "DE123456789" → 6
         assertEquals(6, ISINGenerator.computeCheckDigit("DE123456789"));
     }
 
     @Test
-    void computeCheckDigit_sumIsAlreadyMultipleOfTen_returnsZero() {
-        // Edge case: when sum % 10 == 0, check digit must be 0, not 10
-        // (10 - 0) % 10 = 0  ← the outer % 10 handles this
-        // We find a body whose sum lands on a multiple of 10
-        // "US000000000": U=30, S=28 → "3028000000000"
-        // verify manually and assert result is in valid range
-        int result = ISINGenerator.computeCheckDigit("US000000000");
-        assertTrue(result >= 0 && result <= 9,
-                "Check digit must always be in [0,9], got: " + result);
+    void computeCheckDigit_allZeroBody_returnsZero() {
+        // sum=0 → (10-0)%10=0
+        // Also verifies the outer %10 handles the multiple-of-10 edge case
+        assertEquals(0, ISINGenerator.computeCheckDigit("00000000000"));
     }
 
     @Test
-    void computeCheckDigit_allDigitBody_computesCorrectly() {
-        // Body with no letters — no conversion needed, tests the doubling
-        // and summing logic in isolation
-        int result = ISINGenerator.computeCheckDigit("00000000000");
-        // sum = 0, check digit = (10 - 0) % 10 = 0
-        assertEquals(0, result);
+    void computeCheckDigit_lowercaseInput_isTreatedAsUppercase() {
+        // "de123456789" should produce same result as "DE123456789"
+        assertEquals(
+                ISINGenerator.computeCheckDigit("DE123456789"),
+                ISINGenerator.computeCheckDigit("de123456789")
+        );
     }
 
     @Test
     void computeCheckDigit_resultIsAlwaysInRange() {
-        // Property test — regardless of input, result must be 0–9
-        String[] testBodies = {
-                "AA000000000",
-                "ZZ999999999",
+        // Property test — known real-world ISINs
+        String[] bodies = {
                 "DE123456789",
                 "US037833100",
-                "GB000263494"
+                "GB000263494",
+                "JP3633400001".substring(0, 11),
+                "ZZ999999999"
         };
-        for (String body : testBodies) {
+        for (String body : bodies) {
             int digit = ISINGenerator.computeCheckDigit(body);
             assertTrue(digit >= 0 && digit <= 9,
-                    "Out of range for body " + body + ": " + digit);
+                    "Out of range for: " + body + " → " + digit);
         }
     }
 
     // ── Group 2: Generated ISIN format ───────────────────────────────────────
-    //
-    // These tests verify the structure of generated ISINs —
-    // length, character types at each position — without caring
-    // about the specific values (which are random).
 
     @Test
     void generate_producesExactly12Characters() {
@@ -79,22 +71,17 @@ class ISINGeneratorTest {
     }
 
     @Test
-    void generate_firstCharIsUppercaseLetter() {
-        char first = ISINGenerator.generate().charAt(0);
-        assertTrue(Character.isLetter(first) && Character.isUpperCase(first),
-                "First character must be an uppercase letter, got: " + first);
+    void generate_firstTwoPositionsAreUppercaseLetters() {
+        String isin = ISINGenerator.generate();
+        for (int i = 0; i < 2; i++) {
+            char c = isin.charAt(i);
+            assertTrue(Character.isLetter(c) && Character.isUpperCase(c),
+                    "Position " + i + " must be an uppercase letter, got: " + c);
+        }
     }
 
     @Test
-    void generate_secondCharIsUppercaseLetter() {
-        char second = ISINGenerator.generate().charAt(1);
-        assertTrue(Character.isLetter(second) && Character.isUpperCase(second),
-                "Second character must be an uppercase letter, got: " + second);
-    }
-
-    @Test
-    void generate_positions3to11AreAlphanumeric() {
-        // Positions 2–10 (0-indexed) can be letters or digits — but uppercase only
+    void generate_positions3to11AreUppercaseAlphanumeric() {
         String isin = ISINGenerator.generate();
         for (int i = 2; i <= 10; i++) {
             char c = isin.charAt(i);
@@ -106,82 +93,147 @@ class ISINGeneratorTest {
     }
 
     @Test
-    void generate_lastCharIsDigit() {
-        // Check digit is always 0–9, never a letter
+    void generate_lastPositionIsDigit() {
         char last = ISINGenerator.generate().charAt(11);
         assertTrue(Character.isDigit(last),
-                "Last character (check digit) must be a digit, got: " + last);
+                "Check digit must be a digit, got: " + last);
     }
 
     // ── Group 3: Check digit validity ────────────────────────────────────────
-    //
-    // These tests verify that generated ISINs are self-consistent —
-    // the check digit appended actually matches what computeCheckDigit
-    // would calculate for that body.
-    // If these fail, generate() and computeCheckDigit() are out of sync.
 
     @Test
     void generate_checkDigitMatchesComputedValue() {
-        String isin = ISINGenerator.generate();
-        String body             = isin.substring(0, 11);
-        int expectedCheckDigit  = ISINGenerator.computeCheckDigit(body);
-        int actualCheckDigit    = isin.charAt(11) - '0';
-        assertEquals(expectedCheckDigit, actualCheckDigit,
-                "Check digit mismatch for ISIN: " + isin);
-    }
-
-    @RepeatedTest(50)
-    void generate_repeatedlyProducesIsinsWithValidCheckDigits() {
-        // Run 50 times to catch any non-deterministic failures
-        // (e.g. a bug that only appears for certain character combinations)
         String isin            = ISINGenerator.generate();
-        String body            = isin.substring(0, 11);
-        int expectedCheckDigit = ISINGenerator.computeCheckDigit(body);
+        int expectedCheckDigit = ISINGenerator.computeCheckDigit(isin.substring(0, 11));
         int actualCheckDigit   = isin.charAt(11) - '0';
         assertEquals(expectedCheckDigit, actualCheckDigit,
-                "Invalid check digit in generated ISIN: " + isin);
-    }
-
-    // ── Group 4: Edge cases ───────────────────────────────────────────────────
-    //
-    // Corner cases that are easy to get wrong — all-letters body,
-    // all-digits body, Z (highest letter value), and the multiple-of-10
-    // sum edge case that causes check digit = 0 instead of 10.
-
-    @Test
-    void computeCheckDigit_allLetterBody_handlesMultiDigitExpansionCorrectly() {
-        // All letters → every char expands to a 2-digit number
-        // Tests that the expansion and flattening handles long digit strings correctly
-        int result = ISINGenerator.computeCheckDigit("AAAAAAAAAAA");
-        assertTrue(result >= 0 && result <= 9);
+                "Check digit mismatch: " + isin);
     }
 
     @Test
-    void computeCheckDigit_highestLetterZ_expandsCorrectly() {
-        // Z = 35 — highest possible expansion value
-        // Tests the upper boundary of the c - 'A' + 10 formula
+    void generate_deterministicWithSeededRandom() {
+        // Same seed → same ISIN — verifies generate(Random) is deterministic
+        // Useful to know for reproducing test failures
+        Random seeded1 = new Random(42);
+        Random seeded2 = new Random(42);
+        assertEquals(
+                ISINGenerator.generate(seeded1),
+                ISINGenerator.generate(seeded2),
+                "Same seed must produce same ISIN"
+        );
+    }
+
+    // ── Group 4: Input validation ─────────────────────────────────────────────
+
+    @Test
+    void computeCheckDigit_nullInput_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () ->
+                ISINGenerator.computeCheckDigit(null)
+        );
+    }
+
+    @Test
+    void computeCheckDigit_emptyString_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () ->
+                ISINGenerator.computeCheckDigit("")
+        );
+    }
+
+    @Test
+    void computeCheckDigit_tooShort_throwsIllegalArgumentException() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
+                ISINGenerator.computeCheckDigit("DE12345")
+        );
+        assertTrue(ex.getMessage().contains("11"),
+                "Error message should mention expected length 11");
+    }
+
+    @Test
+    void computeCheckDigit_tooLong_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () ->
+                ISINGenerator.computeCheckDigit("DE1234567890")
+        );
+    }
+
+    @Test
+    void computeCheckDigit_specialCharacters_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () ->
+                ISINGenerator.computeCheckDigit("DE!23456789")
+        );
+    }
+
+    @Test
+    void computeCheckDigit_spaces_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () ->
+                ISINGenerator.computeCheckDigit("DE 23456789")
+        );
+    }
+
+    @Test
+    void generate_nullRandom_throwsIllegalArgumentException() {
+        assertThrows(IllegalArgumentException.class, () ->
+                ISINGenerator.generate(null)
+        );
+    }
+
+    // ── Group 5: Edge cases ───────────────────────────────────────────────────
+
+    @Test
+    void computeCheckDigit_allZsAllNines_handlesMaximumValues() {
+        // Z=35 — highest letter value, tests upper boundary of formula
         int result = ISINGenerator.computeCheckDigit("ZZ999999999");
         assertTrue(result >= 0 && result <= 9);
     }
 
     @Test
-    void computeCheckDigit_singleLetterRemainder_doesNotCorruptDigits() {
-        // Mix of early letters and digits — ensures letter expansion
-        // does not shift or corrupt subsequent digit positions
-        int result = ISINGenerator.computeCheckDigit("A0000000000");
-        // A=10 → expanded starts with "10", rest are zeros
-        // sum should be: 1+0 = 1 (from the doubled/undoubled 1 and 0)
+    void computeCheckDigit_allAs_handlesMinimumLetterValue() {
+        // A=10 — lowest letter value, tests lower boundary of formula
+        int result = ISINGenerator.computeCheckDigit("AAAAAAAAAAA");
         assertTrue(result >= 0 && result <= 9);
     }
 
     @Test
-    void generate_twoCallsProduceDifferentIsins() {
-        // Not a strict guarantee (random collision is theoretically possible)
-        // but with a 36^9 body space the probability of collision is negligible.
-        // This catches obvious bugs like a static or non-random output.
-        String first  = ISINGenerator.generate();
-        String second = ISINGenerator.generate();
-        assertNotEquals(first, second,
-                "Two consecutive generates should not produce identical ISINs");
+    void computeCheckDigit_sumLandsOnMultipleOfTen_returnsZeroNotTen() {
+        // Critical edge case: (10 - sum%10) without outer %10 would return 10
+        // We need to find or verify a body where sum % 10 == 0
+        // "00000000000" produces sum=0 which triggers this path
+        int result = ISINGenerator.computeCheckDigit("00000000000");
+        assertEquals(0, result, "When sum is multiple of 10, check digit must be 0 not 10");
+    }
+
+    // ── Group 6: Regression load tests ───────────────────────────────────────
+
+    @RepeatedTest(100)
+    void generate_100Times_allCheckDigitsValid() {
+        String isin            = ISINGenerator.generate();
+        int expectedCheckDigit = ISINGenerator.computeCheckDigit(isin.substring(0, 11));
+        int actualCheckDigit   = isin.charAt(11) - '0';
+        assertEquals(expectedCheckDigit, actualCheckDigit,
+                "Invalid check digit in: " + isin);
+    }
+
+    @Test
+    void generate_10000Times_allFormatsValid() {
+        // High-volume run — catches non-deterministic bugs that only appear
+        // for specific character combinations
+        for (int i = 0; i < 10_000; i++) {
+            String isin = ISINGenerator.generate();
+            assertEquals(12, isin.length(),             "Wrong length at iteration " + i);
+            assertTrue(Character.isLetter(isin.charAt(0)), "Non-letter at pos 0, iteration " + i);
+            assertTrue(Character.isLetter(isin.charAt(1)), "Non-letter at pos 1, iteration " + i);
+            assertTrue(Character.isDigit(isin.charAt(11)), "Non-digit check digit, iteration " + i);
+        }
+    }
+
+    @Test
+    void generate_1000Times_producesReasonableDiversity() {
+        // Verifies randomness is working — 1000 ISINs should not all be identical
+        // Collision probability with 36^9 body space is astronomically low
+        Set<String> unique = new HashSet<>();
+        for (int i = 0; i < 1000; i++) {
+            unique.add(ISINGenerator.generate());
+        }
+        assertTrue(unique.size() > 990,
+                "Expected near-unique ISINs, got only " + unique.size() + " distinct values");
     }
 }
